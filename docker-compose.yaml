@@ -1,0 +1,60 @@
+# Local-dev / production-shape compose for townsfolk.
+# Two services in one network:
+#
+#   townsfolk           the FastAPI service
+#   postgis-townsfolk   PostGIS 16 sibling
+#
+# Traefik in front terminates TLS for
+# location.openapis.ca and routes /v1/* to townsfolk.
+# Same shape as brian / dispatch / ringo. No published
+# DB port -- Postgres is loopback-only via the docker
+# network.
+
+services:
+  townsfolk:
+    image: kibble.apps.blindhub.ca/cobdfamily/townsfolk:${TOWNSFOLK_TAG:-latest}
+    container_name: townsfolk
+    environment:
+      DATABASE_URL: postgresql://townsfolk:${POSTGRES_PASSWORD:-changeme-dev-db}@postgis-townsfolk:5432/townsfolk
+      TOWNSFOLK_FALLBACK_LAT: ${TOWNSFOLK_FALLBACK_LAT:-49.385}
+      TOWNSFOLK_FALLBACK_LNG: ${TOWNSFOLK_FALLBACK_LNG:-123.358}
+      TOWNSFOLK_RADIUS_DEFAULT_KM: ${TOWNSFOLK_RADIUS_DEFAULT_KM:-100}
+      TOWNSFOLK_RADIUS_CEILING_KM: ${TOWNSFOLK_RADIUS_CEILING_KM:-500}
+    depends_on:
+      postgis-townsfolk:
+        condition: service_healthy
+    ports:
+      - "${TOWNSFOLK_HTTP_PORT:-8003}:8000"
+    restart: unless-stopped
+    networks:
+      - townsfolk
+
+  postgis-townsfolk:
+    image: postgis/postgis:16-3.4
+    container_name: postgis-townsfolk
+    environment:
+      POSTGRES_DB: townsfolk
+      POSTGRES_USER: townsfolk
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme-dev-db}
+    volumes:
+      - postgis-townsfolk-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "townsfolk", "-d", "townsfolk"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - townsfolk
+
+# Traefik integration -- this compose stands alone for
+# dev. Production should add labels mapping
+# location.openapis.ca to the townsfolk service.
+networks:
+  townsfolk:
+    name: townsfolk_default
+
+volumes:
+  postgis-townsfolk-data:
+    name: postgis-townsfolk-data

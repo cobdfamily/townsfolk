@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# uv
+.uv-cache/
+
+# Audio cache (downloaded TwiML <Play> URLs are cached
+# locally so ringo can play them via sound: URIs).
+# Caches are derivative; never commit them.
+data/audio-cache/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Browser-automation / playwright state files (kept
+# consistent with the rest of cobdfamily; brian doesn't
+# ship browser tests today but the convention stands).
+playwright-state/
+session.json
