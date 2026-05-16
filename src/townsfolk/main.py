@@ -62,18 +62,42 @@ async def lifespan(app: FastAPI):
     shutdown. The pool is shared by every request.
     Also wires the process-lifetime counter bag the
     `/metrics` endpoint reads.
+
+    Retries the connect 10x with 1s backoff: under
+    docker-compose, `depends_on: service_healthy`
+    waits for pg_isready, but there is a brief
+    window after that where asyncpg can still see
+    "connection refused" while postgres finishes
+    binding its socket. Without the retry, a single
+    cold-start race leaves the service in
+    degraded-boot mode until manually restarted.
     """
+    import asyncio
+
     cfg: Config = load()
     app.state.config = cfg
     app.state.counters = Counters()
-    try:
-        await init_pool(cfg.database_url)
-        app.state.db_ready = True
-    except Exception as exc:  # noqa: BLE001
+    last_exc: Exception | None = None
+    for attempt in range(10):
+        try:
+            await init_pool(cfg.database_url)
+            app.state.db_ready = True
+            break
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            logger.warning(
+                "db pool init attempt %d/10 failed: %s",
+                attempt + 1, exc,
+            )
+            await asyncio.sleep(1.0)
+    else:
         # Degraded boot: liveness still answers but
         # /v1/lookup will 503. Matches brian's
         # pattern.
-        logger.warning("db pool init failed: %s", exc)
+        logger.warning(
+            "db pool init giving up after 10 tries: %s",
+            last_exc,
+        )
         app.state.db_ready = False
     yield
     await close_pool()
