@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 
 from . import __version__
@@ -36,6 +36,9 @@ from .db import (
 )
 from .metrics import Counters, render as render_metrics
 from .models import (
+    BatchLookupItemResult,
+    BatchLookupRequest,
+    BatchLookupResponse,
     CityWithin,
     CoordsMatch,
     FallbackMatch,
@@ -136,16 +139,26 @@ async def health() -> dict:
     }
 
 
-@app.get("/v1/lookup", response_model=LookupResponse, tags=["Lookup"])
-async def lookup(
-    phone: str | None = Query(default=None),
-    ip: str | None = Query(default=None),
-    lat: float | None = Query(default=None),
-    lng: float | None = Query(default=None),
-    radius_km: float | None = Query(default=None, ge=0),
+async def _resolve_one(
+    *,
+    phone: str | None,
+    ip: str | None,
+    lat: float | None,
+    lng: float | None,
+    radius_km: float | None,
 ) -> LookupResponse:
-    """Three input modes; one envelope. Exactly one of
-    phone, ip, or (lat+lng) must be supplied.
+    """Shared resolver for both GET /v1/lookup and the
+    rows of POST /v1/lookup/batch. Raises HTTPException
+    on shape errors so the GET handler bubbles the 400/
+    503 / 404 unchanged; the batch handler catches and
+    wraps each into a per-row error envelope so a
+    single bad row doesn't poison the whole batch.
+
+    Counter bookkeeping happens HERE (success vs error
+    + per-mode), not in the route handler, so batch
+    requests increment the same counters as solo
+    requests -- dashboards don't have to know the
+    difference.
     """
     cfg: Config = app.state.config
     counters: Counters = app.state.counters
@@ -154,7 +167,13 @@ async def lookup(
         raise HTTPException(503, "database not initialised")
 
     # Validate input shape -- exactly one mode.
-    modes_set = sum([phone is not None, ip is not None, lat is not None or lng is not None])
+    modes_set = sum(
+        [
+            phone is not None,
+            ip is not None,
+            lat is not None or lng is not None,
+        ],
+    )
     if modes_set != 1:
         counters.lookup_errors_total += 1
         raise HTTPException(
@@ -258,6 +277,82 @@ async def lookup(
         radius_km=radius,
         cities_within=_to_cities(cities),
     )
+
+
+@app.get("/v1/lookup", response_model=LookupResponse, tags=["Lookup"])
+async def lookup(
+    phone: str | None = Query(default=None),
+    ip: str | None = Query(default=None),
+    lat: float | None = Query(default=None),
+    lng: float | None = Query(default=None),
+    radius_km: float | None = Query(default=None, ge=0),
+) -> LookupResponse:
+    """Three input modes; one envelope. Exactly one of
+    phone, ip, or (lat+lng) must be supplied. Thin
+    shim over _resolve_one so the batch handler can
+    share the implementation."""
+    return await _resolve_one(
+        phone=phone, ip=ip, lat=lat, lng=lng, radius_km=radius_km,
+    )
+
+
+# v0.3: bulk-mode endpoint -----------------------------
+
+# Items-per-batch ceiling. Same logic as the radius
+# ceiling: protects against payload-amplification
+# scrape attempts. 100 is plenty for an audit pass
+# that wants to resolve every NPA+NXX a carrier
+# emits over a day.
+_BATCH_CAP = 100
+
+
+@app.post(
+    "/v1/lookup/batch",
+    response_model=BatchLookupResponse,
+    tags=["Lookup"],
+)
+async def lookup_batch(
+    body: BatchLookupRequest = Body(...),
+) -> BatchLookupResponse:
+    """v0.3: resolve many inputs in one round-trip.
+    Each row is independent -- a bad input lands in
+    that row's result envelope, the rest still
+    process. Cap of 100 items per request.
+
+    Counters tick the same as solo /v1/lookup hits
+    (one counter increment per item), so dashboards
+    don't see batched traffic as anomalous."""
+    if len(body.items) > _BATCH_CAP:
+        raise HTTPException(
+            422,
+            f"batch too large: {len(body.items)} items "
+            f"(cap is {_BATCH_CAP})",
+        )
+
+    results: list[BatchLookupItemResult] = []
+    for item in body.items:
+        try:
+            resp = await _resolve_one(
+                phone=item.phone,
+                ip=item.ip,
+                lat=item.lat,
+                lng=item.lng,
+                radius_km=item.radius_km,
+            )
+            results.append(
+                BatchLookupItemResult(ok=True, response=resp),
+            )
+        except HTTPException as exc:
+            # Per-row error -- wrap, don't propagate.
+            # Counters already moved (incremented in
+            # _resolve_one BEFORE the throw).
+            results.append(
+                BatchLookupItemResult(
+                    ok=False,
+                    error=f"{exc.status_code}: {exc.detail}",
+                ),
+            )
+    return BatchLookupResponse(results=results)
 
 
 def _to_cities(rows: list[dict]) -> list[CityWithin]:
