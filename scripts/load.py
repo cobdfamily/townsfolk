@@ -177,10 +177,22 @@ async def _load_ip_ranges(conn: asyncpg.Connection, path: str) -> None:
     header):
       0 start_ip, 1 end_ip, 2 continent, 3 country_iso,
       4 region, 5 city, 6 latitude, 7 longitude.
+
+    Loads via Postgres COPY (binary text-CSV mode)
+    instead of executemany -- the city-lite file is
+    ~3M rows and executemany would take 10+ minutes;
+    COPY pushes it through in ~30 seconds. We filter
+    and reorder the columns in Python, then stream
+    the result into COPY as in-memory CSV. inet and
+    geography parsing both happen server-side: the
+    `point` column accepts plain WKT text and
+    defaults to SRID 4326 for the geography type.
     """
     import csv
+    import io
 
-    rows: list[tuple] = []
+    buf = io.StringIO()
+    writer = csv.writer(buf)
     with Path(path).open() as fh:
         reader = csv.reader(fh)
         for row in reader:
@@ -191,23 +203,26 @@ async def _load_ip_ranges(conn: asyncpg.Connection, path: str) -> None:
                 lng = float(row[7])
             except ValueError:
                 continue
-            rows.append(
-                (
+            writer.writerow(
+                [
                     row[0],
                     row[1],
-                    row[5] or None,
-                    row[4] or None,
+                    row[5] or "",
+                    row[4] or "",
                     row[3] or "??",
                     f"POINT({lng} {lat})",
-                ),
+                ],
             )
-    await conn.executemany(
-        """
-        INSERT INTO ip_ranges
-          (start_ip, end_ip, city, province, country, point)
-        VALUES ($1::inet, $2::inet, $3, $4, $5, ST_SetSRID($6::geography, 4326))
-        """,
-        rows,
+
+    # asyncpg's copy_to_table treats a bytes/str
+    # `source` as a path, so wrap the buffered CSV
+    # in a BytesIO and pass the file-like instead.
+    binbuf = io.BytesIO(buf.getvalue().encode("utf-8"))
+    await conn.copy_to_table(
+        "ip_ranges",
+        source=binbuf,
+        columns=["start_ip", "end_ip", "city", "province", "country", "point"],
+        format="csv",
     )
 
 
