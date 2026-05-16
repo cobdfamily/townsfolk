@@ -30,4 +30,4 @@ fall back to Bowen Island (49.385, -123.358) -- by
 design, a sane default for our deployment.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

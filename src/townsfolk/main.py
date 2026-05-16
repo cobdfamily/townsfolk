@@ -109,6 +109,70 @@ async def metrics() -> str:
     )
 
 
+@app.get("/v1/data-version", tags=["Data"])
+async def data_version() -> dict:
+    """v0.5: surface the size + freshness of each
+    loaded table so clients can detect data refreshes
+    + invalidate their own caches.
+
+    Returns row counts plus the most-recent observed
+    `xmin` value per table (Postgres's internal
+    transaction id, monotonically increasing). Two
+    builds that produced the same row counts but
+    different xmins indicate a true refresh ran. A
+    client polling this endpoint can therefore tell
+    "the data is unchanged" from "the data was
+    re-loaded with the same content".
+
+    Always 200; ok=false in the body when the pool
+    isn't up.
+    """
+    if not app.state.db_ready:
+        return {
+            "ok": False,
+            "error": "db pool not initialised",
+        }
+    try:
+        async with pool().acquire() as conn:
+            # One round-trip for all three.
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM exchanges) AS exchanges_rows,
+                    (SELECT COUNT(*) FROM places) AS places_rows,
+                    (SELECT COUNT(*) FROM ip_ranges) AS ip_ranges_rows,
+                    (SELECT MAX(xmin::text::bigint)
+                       FROM exchanges) AS exchanges_xmin,
+                    (SELECT MAX(xmin::text::bigint)
+                       FROM places) AS places_xmin,
+                    (SELECT MAX(xmin::text::bigint)
+                       FROM ip_ranges) AS ip_ranges_xmin
+                """,
+            )
+            return {
+                "ok": True,
+                "tables": {
+                    "exchanges": {
+                        "rows": row["exchanges_rows"],
+                        "xmin": int(row["exchanges_xmin"] or 0),
+                    },
+                    "places": {
+                        "rows": row["places_rows"],
+                        "xmin": int(row["places_xmin"] or 0),
+                    },
+                    "ip_ranges": {
+                        "rows": row["ip_ranges_rows"],
+                        "xmin": int(row["ip_ranges_xmin"] or 0),
+                    },
+                },
+            }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 @app.get("/v1/health/dependencies", tags=["Health"])
 async def health_dependencies() -> dict:
     """v0.4: deep health probe -- DB connection plus
