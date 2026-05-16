@@ -1,9 +1,13 @@
 """Nightly ETL.
 
 Inputs (paths default to env vars; --flags override):
-  TOWNSFOLK_FIREHOSE_JSON     ./telephone-location-data.json
-  TOWNSFOLK_GAZETTEER_JSON    ./canadian-places.json
+  TOWNSFOLK_PHONES_JSON       ./telephone-location-data.json
+  TOWNSFOLK_PLACES_JSON       ./canadian-places.json
   TOWNSFOLK_DBIP_CITY_LITE    ./dbip-city-lite.csv
+
+(The older TOWNSFOLK_FIREHOSE_JSON / TOWNSFOLK_
+GAZETTEER_JSON env names are honored as fallbacks
+for cron operators who haven't migrated yet.)
 
 Database:
   DATABASE_URL                same as the service
@@ -21,8 +25,8 @@ the service keeps serving against the previous
 generation of data until the next successful ETL.
 
 Run order:
-  firehose build              -> ./telephone-location-data.json
-  gazetteer build             -> ./canadian-places.json
+  gazetteer phones build      -> ./telephone-location-data.json
+  gazetteer places build      -> ./canadian-places.json
   curl db-ip lite             -> ./dbip-city-lite.csv
   uv run townsfolk-load       -> bulk-load + analyze
 """
@@ -48,15 +52,23 @@ async def main() -> None:
         ),
     )
     parser.add_argument(
-        "--firehose-json",
+        "--phones-json",
         default=os.environ.get(
-            "TOWNSFOLK_FIREHOSE_JSON", "./telephone-location-data.json",
+            "TOWNSFOLK_PHONES_JSON",
+            os.environ.get(
+                "TOWNSFOLK_FIREHOSE_JSON",
+                "./telephone-location-data.json",
+            ),
         ),
     )
     parser.add_argument(
-        "--gazetteer-json",
+        "--places-json",
         default=os.environ.get(
-            "TOWNSFOLK_GAZETTEER_JSON", "./canadian-places.json",
+            "TOWNSFOLK_PLACES_JSON",
+            os.environ.get(
+                "TOWNSFOLK_GAZETTEER_JSON",
+                "./canadian-places.json",
+            ),
         ),
     )
     parser.add_argument(
@@ -80,13 +92,13 @@ async def main() -> None:
             "TRUNCATE exchanges, places, ip_ranges RESTART IDENTITY",
         )
 
-        # 3a. firehose -> exchanges
-        if Path(args.firehose_json).exists():
-            await _load_exchanges(conn, args.firehose_json)
+        # 3a. gazetteer phones -> exchanges
+        if Path(args.phones_json).exists():
+            await _load_exchanges(conn, args.phones_json)
 
-        # 3b. gazetteer -> places
-        if Path(args.gazetteer_json).exists():
-            await _load_places(conn, args.gazetteer_json)
+        # 3b. gazetteer places -> places
+        if Path(args.places_json).exists():
+            await _load_places(conn, args.places_json)
 
         # 3c. db-ip -> ip_ranges
         if Path(args.dbip_csv).exists():
@@ -99,8 +111,9 @@ async def main() -> None:
 
 
 async def _load_exchanges(conn: asyncpg.Connection, path: str) -> None:
-    """firehose JSON is an array; each record carries
-    a GeoJSON Point with coordinates: [lng, lat]."""
+    """`gazetteer phones` JSON is an array; each record
+    carries a GeoJSON Point with coordinates:
+    [lng, lat]."""
     data = json.loads(Path(path).read_text())
     rows = []
     for r in data:
@@ -128,7 +141,7 @@ async def _load_exchanges(conn: asyncpg.Connection, path: str) -> None:
 
 
 async def _load_places(conn: asyncpg.Connection, path: str) -> None:
-    """gazetteer JSON shape -- see cli/gazetteer."""
+    """`gazetteer places` JSON shape -- see cli/gazetteer."""
     data = json.loads(Path(path).read_text())
     rows = []
     for r in data:

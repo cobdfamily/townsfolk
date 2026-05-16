@@ -1,7 +1,7 @@
 [project]
 name = "townsfolk"
 version = "0.4.0"
-description = "Phone / IP / coords -> point + cities-within-radius. Eats firehose + gazetteer JSONs into PostGIS, serves location.openapis.ca/v1/lookup."
+description = "Phone / IP / coords -> point + cities-within-radius. Eats the two gazetteer JSONs (phones + places) into PostGIS; serves location.openapis.ca/v1/lookup."
 readme = "README.md"
 license = "AGPL-3.0"
 requires-python = ">=3.12"

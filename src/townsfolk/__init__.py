@@ -15,9 +15,9 @@ backend is network-trusted (no per-token auth).
 PostGIS sibling container holds three tables loaded
 nightly by an ETL job:
 
-  exchanges      from firehose JSON -- NPA+NXX ->
+  exchanges      from `gazetteer phones` JSON -- NPA+NXX ->
                  city + point
-  places         from gazetteer JSON -- full
+  places         from `gazetteer places` JSON -- full
                  Canadian settlement catalog with
                  population
   ip_ranges      from db-ip lite -- IP block ->

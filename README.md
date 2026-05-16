@@ -20,17 +20,17 @@ within `radius_km` (default 100, hard ceiling 500).
 Three nightly inputs, one PostGIS, one FastAPI:
 
 ```
-firehose build  -> telephone-location-data.json  ┐
-gazetteer build -> canadian-places.json          ├─> ETL -> PostGIS
-curl db-ip lite -> dbip-city-lite.csv            ┘             |
-                                                               v
-                       Traefik -> townsfolk (FastAPI) <--------+
-                              location.openapis.ca/v1/lookup
+gazetteer phones build  -> telephone-location-data.json  ┐
+gazetteer places build  -> canadian-places.json          ├─> ETL -> PostGIS
+curl db-ip lite         -> dbip-city-lite.csv            ┘             |
+                                                                       v
+                            Traefik -> townsfolk (FastAPI) <-----------+
+                                  location.openapis.ca/v1/lookup
 ```
 
 The service itself owns no source data -- it ingests
-the outputs of `firehose` (phone) and `gazetteer`
-(cities) plus the db-ip lite IP feed. ETL runs
+both outputs of `gazetteer` (the `phones` and `places`
+pipelines) plus the db-ip lite IP feed. ETL runs
 TRUNCATE + bulk-load, no migrations.
 
 ## Run locally
@@ -38,8 +38,8 @@ TRUNCATE + bulk-load, no migrations.
 ```sh
 docker compose up -d
 # wait for postgis healthcheck, then in another shell:
-TOWNSFOLK_FIREHOSE_JSON=/path/to/telephone-location-data.json \
-TOWNSFOLK_GAZETTEER_JSON=/path/to/canadian-places.json \
+TOWNSFOLK_PHONES_JSON=/path/to/telephone-location-data.json \
+TOWNSFOLK_PLACES_JSON=/path/to/canadian-places.json \
 TOWNSFOLK_DBIP_CITY_LITE=/path/to/dbip-city-lite.csv \
 DATABASE_URL=postgresql://townsfolk:changeme-dev-db@localhost:5432/townsfolk \
   uv run python scripts/load.py

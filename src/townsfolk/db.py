@@ -60,8 +60,9 @@ def pool() -> asyncpg.Pool:
 
 
 async def lookup_exchange(npa: str, nxx: str) -> dict[str, Any] | None:
-    """Match a NANP NPA+NXX against the firehose-loaded
-    exchanges table. Returns the matched row or None."""
+    """Match a NANP NPA+NXX against the `gazetteer
+    phones`-loaded exchanges table. Returns the
+    matched row or None."""
     async with pool().acquire() as conn:
         row = await conn.fetchrow(
             """
