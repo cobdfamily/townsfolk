@@ -39,28 +39,30 @@ CREATE INDEX IF NOT EXISTS places_name_lower_idx
     ON places (LOWER(name), province);
 
 
--- IP ranges. Loaded from db-ip lite. We store the
--- ranges as inet pairs + a generated inet4range/
--- inet6range so the @> containment query uses a
--- GiST index. db-ip ships separate v4 and v6 files;
--- both feed this one table.
+-- IP ranges. Loaded from db-ip lite. Stored as plain
+-- inet pairs; containment is queried as
+-- `WHERE start_ip <= $1 AND end_ip >= $1`. db-ip
+-- ships separate v4 and v6 files; both feed this one
+-- table.
+--
+-- We deliberately avoid the `ip4r` extension's
+-- `inetrange` + GiST index trick because postgis/
+-- postgis:16-3.4 (the base image we ship) doesn't
+-- include ip4r. A B-tree on (start_ip, end_ip) is
+-- good enough for the db-ip lite scale (~3M ranges).
 CREATE TABLE IF NOT EXISTS ip_ranges (
     id              bigserial PRIMARY KEY,
     start_ip        inet NOT NULL,
     end_ip          inet NOT NULL,
-    range           inetrange GENERATED ALWAYS AS
-                    (inetrange(start_ip, end_ip, '[]'))
-                    STORED,
     city            text,
     province        text,
     country         text NOT NULL,
     point           geography(Point, 4326) NOT NULL,
     accuracy_radius numeric
 );
--- Note: inetrange is provided by the `ip4r`
--- extension. If your PostGIS image doesn't carry
--- ip4r, swap this for `int8range` + a custom
--- ip-to-int8 cast at ingest time. The query
--- pattern stays the same shape.
-CREATE INDEX IF NOT EXISTS ip_ranges_range_gist
-    ON ip_ranges USING GIST (range);
+-- B-tree on start_ip alone is enough: the lookup
+-- pattern is "find the row whose start_ip is the
+-- largest <= queried ip, then verify end_ip >= ip".
+-- See db.py::lookup_ip.
+CREATE INDEX IF NOT EXISTS ip_ranges_start_ip_idx
+    ON ip_ranges (start_ip);

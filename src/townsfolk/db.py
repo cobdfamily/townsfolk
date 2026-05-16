@@ -23,10 +23,11 @@ Schema assumed (created by scripts/schema.sql):
                  inet, end_ip inet, city text,
                  province text, country text,
                  point geography(Point), accuracy_radius
-                 numeric NULL, range inet4range GENERATED
+                 numeric NULL
 
-  All three carry a GiST index on point /
-  inet4range. Refresh = TRUNCATE + bulk-load nightly.
+  exchanges + places carry a GiST index on point;
+  ip_ranges carries a B-tree on start_ip. Refresh =
+  TRUNCATE + bulk-load nightly.
 """
 
 from __future__ import annotations
@@ -80,9 +81,10 @@ async def lookup_exchange(npa: str, nxx: str) -> dict[str, Any] | None:
 
 async def lookup_ip(ip: str) -> dict[str, Any] | None:
     """Find the IP range containing the supplied
-    address. The `range` column is a generated
-    inet4range / inet6range with a GiST index, so this
-    is an indexed lookup."""
+    address. Uses the B-tree on start_ip: the largest
+    start_ip <= queried ip is the only candidate row,
+    then we verify end_ip >= ip. ORDER BY start_ip DESC
+    LIMIT 1 + the index makes this an indexed seek."""
     async with pool().acquire() as conn:
         row = await conn.fetchrow(
             """
@@ -90,7 +92,9 @@ async def lookup_ip(ip: str) -> dict[str, Any] | None:
                    ST_Y(point::geometry) AS lat,
                    ST_X(point::geometry) AS lng
             FROM ip_ranges
-            WHERE range @> $1::inet
+            WHERE start_ip <= $1::inet
+              AND end_ip   >= $1::inet
+            ORDER BY start_ip DESC
             LIMIT 1
             """,
             ip,
