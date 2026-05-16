@@ -14,6 +14,11 @@ FROM python:3.12-slim AS runtime
 WORKDIR /app
 ENV PATH="/app/.venv/bin:$PATH"
 COPY --from=builder /app /app
+# scripts/ holds load.py + schema.sql -- both
+# consumed by the townsfolk-etl one-shot container
+# in docker-compose. Same image, different
+# entrypoint at runtime.
+COPY scripts ./scripts
 RUN useradd -r -u 1000 townsfolk && chown -R townsfolk /app
 USER townsfolk
 EXPOSE 8000

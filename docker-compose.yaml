@@ -1,14 +1,29 @@
 # Local-dev / production-shape compose for townsfolk.
-# Two services in one network:
+# Three services in one network:
 #
-#   townsfolk           the FastAPI service
-#   postgis-townsfolk   PostGIS 16 sibling
+#   townsfolk           FastAPI service (HTTP)
+#   postgis-townsfolk   PostGIS 16 sibling (data)
+#   gazetteer           Node CLI (one-shot job;
+#                       not auto-started)
 #
 # Traefik in front terminates TLS for
-# location.openapis.ca and routes /v1/* to townsfolk.
-# Same shape as brian / dispatch / ringo. No published
-# DB port -- Postgres is loopback-only via the docker
-# network.
+# location.openapis.ca and routes /v1/* to
+# townsfolk. Same shape as brian / dispatch / ringo.
+# No published DB port -- Postgres is loopback-only
+# via the docker network.
+#
+# Data flow:
+#
+#   $ docker compose up -d                # start svc + DB
+#   $ docker compose run --rm gazetteer phones build
+#   $ docker compose run --rm gazetteer places build
+#   $ docker compose run --rm townsfolk-etl
+#                                          # bulk-load into PG
+#   $ curl localhost:8003/v1/lookup?...    # serve!
+#
+# The gazetteer container produces the two JSONs
+# into the shared `gazetteer-data` volume; the etl
+# job reads them from the same volume into PostGIS.
 
 services:
   townsfolk:
@@ -48,9 +63,52 @@ services:
     networks:
       - townsfolk
 
-# Traefik integration -- this compose stands alone for
-# dev. Production should add labels mapping
-# location.openapis.ca to the townsfolk service.
+  # One-shot CLI. `docker compose run --rm gazetteer
+  # phones build` writes telephone-location-data.json
+  # into the shared volume; similarly for `places
+  # build`. Defaults to --help when invoked with no
+  # args (matches `gazetteer` on the host).
+  gazetteer:
+    image: kibble.apps.blindhub.ca/cobdfamily/gazetteer:${GAZETTEER_TAG:-latest}
+    container_name: gazetteer
+    volumes:
+      - gazetteer-data:/data
+    restart: "no"
+    profiles:
+      # `profiles` excludes the service from `up`
+      # unless its profile is selected. Keeps a plain
+      # `docker compose up -d` from trying to start
+      # a CLI as a long-running service. Drive it via
+      # `docker compose run --rm gazetteer ...`
+      # which ignores profiles.
+      - jobs
+    networks:
+      - townsfolk
+
+  # The townsfolk ETL: reads both JSONs from the
+  # shared volume + the db-ip lite CSV (mounted
+  # separately) and bulk-loads PG. Same profile as
+  # gazetteer so `up` doesn't try to start it.
+  townsfolk-etl:
+    image: kibble.apps.blindhub.ca/cobdfamily/townsfolk:${TOWNSFOLK_TAG:-latest}
+    container_name: townsfolk-etl
+    entrypoint: ["python", "/app/scripts/load.py"]
+    environment:
+      DATABASE_URL: postgresql://townsfolk:${POSTGRES_PASSWORD:-changeme-dev-db}@postgis-townsfolk:5432/townsfolk
+      TOWNSFOLK_PHONES_JSON: /data/telephone-location-data.json
+      TOWNSFOLK_PLACES_JSON: /data/canadian-places.json
+      TOWNSFOLK_DBIP_CITY_LITE: /data/dbip-city-lite.csv
+    volumes:
+      - gazetteer-data:/data
+    depends_on:
+      postgis-townsfolk:
+        condition: service_healthy
+    restart: "no"
+    profiles:
+      - jobs
+    networks:
+      - townsfolk
+
 networks:
   townsfolk:
     name: townsfolk_default
@@ -58,3 +116,9 @@ networks:
 volumes:
   postgis-townsfolk-data:
     name: postgis-townsfolk-data
+  # Shared between the gazetteer job (writes) and
+  # the townsfolk-etl job (reads). Named so an
+  # operator can inspect via `docker volume
+  # inspect gazetteer-data`.
+  gazetteer-data:
+    name: gazetteer-data
