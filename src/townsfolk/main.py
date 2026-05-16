@@ -21,7 +21,9 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Body, FastAPI, HTTPException, Query
+import re
+
+from fastapi import Body, FastAPI, HTTPException, Path, Query
 from fastapi.responses import PlainTextResponse
 
 from . import __version__
@@ -106,6 +108,48 @@ async def metrics() -> str:
     """
     return render_metrics(
         app.state.counters, db_ready=app.state.db_ready,
+    )
+
+
+# Three digits each; the regex lives at the route
+# level so an obviously-bad path doesn't reach the
+# DB and trip the planner.
+_NPA_NXX_RE = re.compile(r"^\d{3}$")
+
+
+@app.get(
+    "/v1/exchanges/{npa}/{nxx}",
+    response_model=PhoneMatch,
+    tags=["Phones"],
+)
+async def get_exchange(
+    npa: str = Path(..., min_length=3, max_length=3),
+    nxx: str = Path(..., min_length=3, max_length=3),
+) -> PhoneMatch:
+    """v0.6: direct NPA+NXX lookup. Faster path than
+    `/v1/lookup?phone=...` when the caller already
+    has the components parsed -- skips libphonenumber-
+    style parsing + the Canadian-vs-US fallback
+    branch, just hits the exchanges table.
+
+    Returns 404 when the (NPA, NXX) pair isn't
+    assigned. 503 when the DB is down (matches the
+    behaviour of the other phone path)."""
+    if not _NPA_NXX_RE.match(npa) or not _NPA_NXX_RE.match(nxx):
+        raise HTTPException(
+            400, "npa and nxx must each be exactly 3 digits",
+        )
+    if not app.state.db_ready:
+        raise HTTPException(503, "database not initialised")
+    row = await lookup_exchange(npa, nxx)
+    if row is None:
+        raise HTTPException(404, f"no exchange for {npa}-{nxx}")
+    return PhoneMatch(
+        npa=row["npa"],
+        nxx=row["nxx"],
+        exchange_area=row["exchange_area"],
+        province=row["province"],
+        carrier=row.get("carrier"),
     )
 
 
