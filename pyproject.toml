@@ -1,6 +1,6 @@
 [project]
 name = "townsfolk"
-version = "0.6.0"
+version = "0.7.0"
 description = "Phone / IP / coords -> point + cities-within-radius. Eats the two gazetteer JSONs (phones + places) into PostGIS; serves location.openapis.ca/v1/lookup."
 readme = "README.md"
 license = "AGPL-3.0"

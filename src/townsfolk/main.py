@@ -91,6 +91,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# v0.7: X-Request-ID -- minted if missing, echoed in
+# the response header, pinned to a contextvar so the
+# id flows through async logging without thread-
+# through. Must be OUTSIDE any other middleware so
+# the id is available for the rest of the chain.
+from .middleware import RequestIdMiddleware  # noqa: E402
+
+app.add_middleware(RequestIdMiddleware)
+
 
 @app.get("/", tags=["Liveness"])
 async def liveness() -> dict:
