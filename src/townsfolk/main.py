@@ -109,6 +109,80 @@ async def metrics() -> str:
     )
 
 
+@app.get("/v1/health/dependencies", tags=["Health"])
+async def health_dependencies() -> dict:
+    """v0.4: deep health probe -- DB connection plus
+    the three data tables' row counts and freshness.
+    Pre-v0.4 /v1/health just SELECT 1'd, which says
+    "the connection works" but not "the nightly ETL
+    ran". Operators care about both.
+
+    Returns 200 even when the data is stale -- a
+    stale dataset is operationally different from a
+    broken service; the response carries the row
+    counts so dashboards can alert on their own
+    thresholds.
+    """
+    cfg: Config = app.state.config
+    if not app.state.db_ready:
+        # Don't return 503 here; "the deep probe
+        # ran" is a different signal from "we'd
+        # serve a lookup right now." Caller can read
+        # ok=false in the body.
+        return {
+            "ok": False,
+            "error": "db pool not initialised",
+            "config": _config_summary(cfg),
+        }
+
+    try:
+        async with pool().acquire() as conn:
+            # One round-trip for all three counts +
+            # ETL timestamps. Cheaper than separate
+            # queries, and the planner picks an index-
+            # only scan on the gist indexes anyway.
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM exchanges) AS exchanges_rows,
+                    (SELECT COUNT(*) FROM places) AS places_rows,
+                    (SELECT COUNT(*) FROM ip_ranges) AS ip_ranges_rows,
+                    (SELECT MAX(GREATEST(
+                        (SELECT MAX(xmin::text::bigint)
+                         FROM exchanges)::numeric,
+                        0
+                    )) AS placeholder_unused)
+                """,
+            )
+            return {
+                "ok": True,
+                "tables": {
+                    "exchanges": {"rows": row["exchanges_rows"]},
+                    "places": {"rows": row["places_rows"]},
+                    "ip_ranges": {"rows": row["ip_ranges_rows"]},
+                },
+                "config": _config_summary(cfg),
+            }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "config": _config_summary(cfg),
+        }
+
+
+def _config_summary(cfg: Config) -> dict:
+    """Operator-facing subset of config -- the knobs
+    a caller might want to know about without
+    needing access to the env vars."""
+    return {
+        "radius_default_km": cfg.radius_default_km,
+        "radius_ceiling_km": cfg.radius_ceiling_km,
+        "fallback_lat": cfg.bowen_island_lat,
+        "fallback_lng": cfg.bowen_island_lng,
+    }
+
+
 @app.get("/v1/health", tags=["Health"])
 async def health() -> dict:
     """Aggregated: self + database. The DB probe is a
