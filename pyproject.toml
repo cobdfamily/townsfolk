@@ -11,6 +11,7 @@ dependencies = [
   "pydantic>=2.10",
   "asyncpg>=0.30",
   "httpx>=0.28",
+  "redis>=5.2",
 ]
 
 [project.scripts]

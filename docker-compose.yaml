@@ -35,11 +35,40 @@ services:
       TOWNSFOLK_FALLBACK_LNG: ${TOWNSFOLK_FALLBACK_LNG:-123.358}
       TOWNSFOLK_RADIUS_DEFAULT_KM: ${TOWNSFOLK_RADIUS_DEFAULT_KM:-100}
       TOWNSFOLK_RADIUS_CEILING_KM: ${TOWNSFOLK_RADIUS_CEILING_KM:-500}
+      # Redis cache for /v1/lookup. Unset / blank
+      # disables caching entirely -- the service
+      # still serves, just slower. Empty default
+      # would keep the cache off; we point it at
+      # the sibling container instead.
+      TOWNSFOLK_REDIS_URL: ${TOWNSFOLK_REDIS_URL:-redis://redis-townsfolk:6379/0}
+      TOWNSFOLK_CACHE_TTL_SECONDS: ${TOWNSFOLK_CACHE_TTL_SECONDS:-3600}
     depends_on:
       postgis-townsfolk:
         condition: service_healthy
+      redis-townsfolk:
+        condition: service_healthy
     ports:
       - "${TOWNSFOLK_HTTP_PORT:-8003}:8000"
+    restart: unless-stopped
+    networks:
+      - townsfolk
+
+  # Redis cache sibling. Lookups are deterministic
+  # between ETL runs (TRUNCATE + bulk-reload nightly),
+  # so caching them at the /v1/lookup envelope buys a
+  # ~10x latency drop on cache hits. No persistence;
+  # losing the cache is a slow-warmup, not a
+  # correctness problem.
+  redis-townsfolk:
+    image: redis:7-alpine
+    container_name: redis-townsfolk
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 2s
     restart: unless-stopped
     networks:
       - townsfolk

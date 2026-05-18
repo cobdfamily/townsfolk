@@ -180,6 +180,30 @@ echo "$direct" | python3 -c \
    assert b['province']=='MB'"
 ok "direct exchange lookup"
 
+echo "== cache: second identical lookup hits Redis"
+# At this point we've already done one Toronto
+# phone lookup + one 8.8.8.8 ip lookup; both should
+# have populated the cache. Hit each one again and
+# verify the cache_hits_total counter advanced.
+# /metrics is text/plain Prometheus exposition; we
+# scrape the counter line by name.
+metrics_before=$(curl -fsS "http://localhost:${TS_PORT}/metrics")
+hits_before=$(echo "$metrics_before" \
+  | awk '/^townsfolk_lookup_cache_hits_total / {print $2}')
+curl -fsS "http://localhost:${TS_PORT}/v1/lookup?phone=%2B14162000199" >/dev/null
+curl -fsS "http://localhost:${TS_PORT}/v1/lookup?ip=8.8.8.8" >/dev/null
+metrics_after=$(curl -fsS "http://localhost:${TS_PORT}/metrics")
+hits_after=$(echo "$metrics_after" \
+  | awk '/^townsfolk_lookup_cache_hits_total / {print $2}')
+cache_ready=$(echo "$metrics_after" \
+  | awk '/^townsfolk_cache_ready / {print $2}')
+[ "$cache_ready" = "1" ] \
+  || fail "cache not ready: townsfolk_cache_ready=$cache_ready"
+delta=$((hits_after - hits_before))
+[ "$delta" -ge 2 ] \
+  || fail "expected cache hits to advance by >=2, got $delta ($hits_before -> $hits_after)"
+ok "cache hits advanced by $delta (cache_ready=$cache_ready)"
+
 echo "== X-Request-ID echoed"
 rid=$(curl -fsS -H 'X-Request-ID: trace-abc-123' \
   "http://localhost:${TS_PORT}/" -i | tr -d '\r' | grep -i '^x-request-id:')

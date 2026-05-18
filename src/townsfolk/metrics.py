@@ -40,9 +40,17 @@ class Counters:
         },
     )
     lookup_errors_total: int = 0
+    # Cache observability. hits + misses sum to the
+    # cacheable-lookup count (everything except the
+    # validation-error path). Hit ratio is
+    # hits / (hits + misses).
+    lookup_cache_hits_total: int = 0
+    lookup_cache_misses_total: int = 0
 
 
-def render(counters: Counters, *, db_ready: bool) -> str:
+def render(
+    counters: Counters, *, db_ready: bool, cache_ready: bool,
+) -> str:
     """Plain-text exposition. Each metric carries a
     HELP + TYPE line so Prometheus can parse the
     series correctly even on first scrape.
@@ -63,9 +71,18 @@ def render(counters: Counters, *, db_ready: bool) -> str:
             "# HELP townsfolk_lookup_errors_total /v1/lookup calls that ended in 4xx/5xx.",
             "# TYPE townsfolk_lookup_errors_total counter",
             f"townsfolk_lookup_errors_total {counters.lookup_errors_total}",
+            "# HELP townsfolk_lookup_cache_hits_total /v1/lookup calls served from the Redis cache.",
+            "# TYPE townsfolk_lookup_cache_hits_total counter",
+            f"townsfolk_lookup_cache_hits_total {counters.lookup_cache_hits_total}",
+            "# HELP townsfolk_lookup_cache_misses_total /v1/lookup calls that missed the cache and hit Postgres.",
+            "# TYPE townsfolk_lookup_cache_misses_total counter",
+            f"townsfolk_lookup_cache_misses_total {counters.lookup_cache_misses_total}",
             "# HELP townsfolk_db_ready 1 if the PostGIS pool initialised at boot, else 0.",
             "# TYPE townsfolk_db_ready gauge",
             f"townsfolk_db_ready {1 if db_ready else 0}",
+            "# HELP townsfolk_cache_ready 1 if the Redis cache connected at boot, else 0.",
+            "# TYPE townsfolk_cache_ready gauge",
+            f"townsfolk_cache_ready {1 if cache_ready else 0}",
             "",
         ],
     )

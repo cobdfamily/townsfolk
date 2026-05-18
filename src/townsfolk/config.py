@@ -28,6 +28,16 @@ class Config:
     bowen_island_lng: float
     radius_default_km: float
     radius_ceiling_km: float
+    # Empty string disables the cache entirely; the
+    # service still serves, just slower. Set to the
+    # Redis URL (typically redis://redis-townsfolk:
+    # 6379/0 inside docker-compose).
+    redis_url: str
+    # 1 hour by default. ETL is nightly TRUNCATE +
+    # reload, so a 1h TTL means stale data is bounded
+    # by ~1h post-ETL. Bump higher (24h, 7d) once the
+    # ETL bumps an explicit cache-bust on completion.
+    cache_ttl_seconds: int
 
 
 def load() -> Config:
@@ -58,5 +68,9 @@ def load() -> Config:
         # Lower Mainland in a single hit.
         radius_ceiling_km=float(
             os.environ.get("TOWNSFOLK_RADIUS_CEILING_KM", "500"),
+        ),
+        redis_url=os.environ.get("TOWNSFOLK_REDIS_URL", ""),
+        cache_ttl_seconds=int(
+            os.environ.get("TOWNSFOLK_CACHE_TTL_SECONDS", "3600"),
         ),
     )

@@ -27,6 +27,7 @@ from fastapi import Body, FastAPI, HTTPException, Path, Query
 from fastapi.responses import PlainTextResponse
 
 from . import __version__
+from . import cache
 from .config import Config, load
 from .db import (
     cities_within,
@@ -99,7 +100,13 @@ async def lifespan(app: FastAPI):
             last_exc,
         )
         app.state.db_ready = False
+
+    # Cache init is best-effort: blank REDIS_URL or
+    # an unreachable redis is a logged warning, not a
+    # boot failure. Lookups still serve, just slower.
+    await cache.init_cache(cfg.redis_url)
     yield
+    await cache.close_cache()
     await close_pool()
 
 
@@ -140,7 +147,9 @@ async def metrics() -> str:
     it.
     """
     return render_metrics(
-        app.state.counters, db_ready=app.state.db_ready,
+        app.state.counters,
+        db_ready=app.state.db_ready,
+        cache_ready=cache.is_ready(),
     )
 
 
@@ -374,6 +383,14 @@ async def _resolve_one(
     requests increment the same counters as solo
     requests -- dashboards don't have to know the
     difference.
+
+    v0.14: Redis-backed lookup cache wraps the DB path.
+    We parse the phone early so the cache key uses the
+    canonical E.164 form (so 4162000199, +14162000199,
+    and 416-200-0199 share a slot). 404 / 400 results
+    aren't cached -- they're cheap to recompute and
+    caching them would tie the negative-result TTL to
+    the success-result TTL.
     """
     cfg: Config = app.state.config
     counters: Counters = app.state.counters
@@ -405,11 +422,44 @@ async def _resolve_one(
         cfg.radius_ceiling_km,
     )
 
-    # -- phone path --------------------------------
+    # Parse phone up-front so the cache key uses the
+    # normalised E.164 form. Failed parse is a 400 we
+    # surface before any cache work.
+    parsed = None
     if phone is not None:
         parsed = parse_phone(phone)
         if parsed is None:
+            counters.lookup_errors_total += 1
             raise HTTPException(400, f"could not parse phone: {phone!r}")
+
+    cache_key = cache.lookup_cache_key(
+        phone_e164=parsed.e164 if parsed is not None else None,
+        ip=ip,
+        lat=lat,
+        lng=lng,
+        radius_km=radius,
+    )
+    if cache_key is not None:
+        cached = await cache.get_lookup(cache_key)
+        if cached is not None:
+            counters.lookup_cache_hits_total += 1
+            # We still attribute the hit to its mode
+            # for the by-mode counter; otherwise the
+            # mode break-out goes to zero after cache
+            # warms up.
+            kind = cached.get("input", {}).get("kind", "unknown")
+            mode = (
+                cached.get("match", {}).get("kind")
+                if kind == "phone"
+                else kind
+            ) or "unknown"
+            if mode in counters.lookups_by_mode:
+                counters.lookups_by_mode[mode] += 1
+            return LookupResponse.model_validate(cached)
+    counters.lookup_cache_misses_total += 1
+
+    # -- phone path --------------------------------
+    if parsed is not None:
         if not parsed.is_canadian:
             counters.lookups_by_mode["fallback"] += 1
             # Bowen Island fallback per the design.
@@ -418,19 +468,23 @@ async def _resolve_one(
                 cfg.bowen_island_lng,
                 radius,
             )
-            return LookupResponse(
-                input=LookupInput(kind="phone", value=parsed.e164),
-                point=LookupPoint(
-                    lat=cfg.bowen_island_lat,
-                    lng=cfg.bowen_island_lng,
-                    source="fallback",
+            return await _finalize(
+                cache_key,
+                LookupResponse(
+                    input=LookupInput(kind="phone", value=parsed.e164),
+                    point=LookupPoint(
+                        lat=cfg.bowen_island_lat,
+                        lng=cfg.bowen_island_lng,
+                        source="fallback",
+                    ),
+                    match=FallbackMatch(
+                        reason=f"non-Canadian NPA: {parsed.npa}",
+                        fallback_city="Bowen Island, BC",
+                    ),
+                    radius_km=radius,
+                    cities_within=_to_cities(cities),
                 ),
-                match=FallbackMatch(
-                    reason=f"non-Canadian NPA: {parsed.npa}",
-                    fallback_city="Bowen Island, BC",
-                ),
-                radius_km=radius,
-                cities_within=_to_cities(cities),
+                cfg.cache_ttl_seconds,
             )
         row = await lookup_exchange(parsed.npa, parsed.nxx)
         if row is None:
@@ -441,20 +495,24 @@ async def _resolve_one(
             )
         counters.lookups_by_mode["phone"] += 1
         cities = await cities_within(row["lat"], row["lng"], radius)
-        return LookupResponse(
-            input=LookupInput(kind="phone", value=parsed.e164),
-            point=LookupPoint(
-                lat=row["lat"], lng=row["lng"], source="phone",
+        return await _finalize(
+            cache_key,
+            LookupResponse(
+                input=LookupInput(kind="phone", value=parsed.e164),
+                point=LookupPoint(
+                    lat=row["lat"], lng=row["lng"], source="phone",
+                ),
+                match=PhoneMatch(
+                    npa=row["npa"],
+                    nxx=row["nxx"],
+                    exchange_area=row["exchange_area"],
+                    province=row["province"],
+                    carrier=row.get("carrier"),
+                ),
+                radius_km=radius,
+                cities_within=_to_cities(cities),
             ),
-            match=PhoneMatch(
-                npa=row["npa"],
-                nxx=row["nxx"],
-                exchange_area=row["exchange_area"],
-                province=row["province"],
-                carrier=row.get("carrier"),
-            ),
-            radius_km=radius,
-            cities_within=_to_cities(cities),
+            cfg.cache_ttl_seconds,
         )
 
     # -- ip path -----------------------------------
@@ -465,33 +523,57 @@ async def _resolve_one(
             raise HTTPException(404, f"no IP range covers {ip!r}")
         counters.lookups_by_mode["ip"] += 1
         cities = await cities_within(row["lat"], row["lng"], radius)
-        return LookupResponse(
-            input=LookupInput(kind="ip", value=ip),
-            point=LookupPoint(
-                lat=row["lat"], lng=row["lng"], source="ip",
+        return await _finalize(
+            cache_key,
+            LookupResponse(
+                input=LookupInput(kind="ip", value=ip),
+                point=LookupPoint(
+                    lat=row["lat"], lng=row["lng"], source="ip",
+                ),
+                match=IpMatch(
+                    ip=ip,
+                    city=row.get("city"),
+                    province=row.get("province"),
+                    country=row.get("country") or "??",
+                    accuracy_radius_km=row.get("accuracy_radius"),
+                ),
+                radius_km=radius,
+                cities_within=_to_cities(cities),
             ),
-            match=IpMatch(
-                ip=ip,
-                city=row.get("city"),
-                province=row.get("province"),
-                country=row.get("country") or "??",
-                accuracy_radius_km=row.get("accuracy_radius"),
-            ),
-            radius_km=radius,
-            cities_within=_to_cities(cities),
+            cfg.cache_ttl_seconds,
         )
 
     # -- coords path -------------------------------
     assert lat is not None and lng is not None
     counters.lookups_by_mode["coords"] += 1
     cities = await cities_within(lat, lng, radius)
-    return LookupResponse(
-        input=LookupInput(kind="coords", value=f"{lat},{lng}"),
-        point=LookupPoint(lat=lat, lng=lng, source="input"),
-        match=CoordsMatch(),
-        radius_km=radius,
-        cities_within=_to_cities(cities),
+    return await _finalize(
+        cache_key,
+        LookupResponse(
+            input=LookupInput(kind="coords", value=f"{lat},{lng}"),
+            point=LookupPoint(lat=lat, lng=lng, source="input"),
+            match=CoordsMatch(),
+            radius_km=radius,
+            cities_within=_to_cities(cities),
+        ),
+        cfg.cache_ttl_seconds,
     )
+
+
+async def _finalize(
+    cache_key: str | None,
+    resp: LookupResponse,
+    ttl_seconds: int,
+) -> LookupResponse:
+    """Set cache (best-effort) and return. Centralising
+    the write keeps the three success paths uniform
+    and avoids accidentally caching a 404/400 branch.
+    """
+    if cache_key is not None:
+        await cache.set_lookup(
+            cache_key, resp.model_dump(mode="json"), ttl_seconds,
+        )
+    return resp
 
 
 @app.get("/v1/lookup", response_model=LookupResponse, tags=["Lookup"])
