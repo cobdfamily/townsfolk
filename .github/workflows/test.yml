@@ -37,11 +37,11 @@ jobs:
         with: { version: latest, enable-cache: true }
       - run: uv python install 3.12
       - run: uv sync --frozen
-      - name: run pytest with coverage
-        run: uv run pytest -q --cov --cov-report=term --cov-report=xml
-      - name: upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-xml
-          path: coverage.xml
-          if-no-files-found: warn
+      - name: run pytest
+        # No --cov flags; townsfolk doesn't have
+        # pytest-cov in dev deps yet. When coverage gates
+        # land across the fleet (IT-stack maturity 3-12
+        # month item), add pytest-cov to pyproject + flip
+        # this back to the coverage variant the rest of
+        # the fleet uses.
+        run: uv run pytest -q
